@@ -71,31 +71,6 @@ def create_task(
     except Exception as e:
         raise DatabaseError()
 
-# @router.get('/tasks', response_model=GetTasksResponse)
-# def get_tasks(
-#     token_payload: dict = Depends(JWTBearer()),
-#     session: Session = Depends(get_session)
-# ):
-#     try:
-#         tasks = session.exec(select(Task)).all()
-#         if not tasks:
-#             raise TaskNotFound()
-#         task_list = [
-#             {
-#                 "id": str(task.id),
-#                 "title": task.title,
-#                 "description": task.description,
-#                 "created_by": task.created_by,
-#                 "completed": task.completed,
-#                 "created_at": task.created_at.isoformat(),
-#                 "updated_at": task.updated_at.isoformat()
-#             }
-#             for task in tasks
-#         ]
-#         return GetTasksResponse(tasks=task_list) # type: ignore
-#     except Exception as e:
-#         raise GeneralError(message=f"Unexpected error: {str(e)}")
-
 @router.get('/tasks/{id}', response_model=TaskResponse)
 def get_task_by_id(
     id: int,
@@ -191,12 +166,11 @@ def delete_task(
     except Exception as e:
         raise GeneralError(message=f"Unexpected error: {str(e)}")
 
-
 @router.get('/tasks', response_model=GetTasksResponse)
 def get_tasks(
     token_payload: dict = Depends(JWTBearer()),
     session: Session = Depends(get_session),
-    limit: int = 10,  # Default page size
+    limit: int = 5,  # Default page size
     offset: int = 0   # Default starting point
 ):
     try:
@@ -244,8 +218,86 @@ def get_tasks(
     except Exception as e:
         raise GeneralError(message=f"Unexpected error: {str(e)}")
 
+@router.put('/tasks/{id}', response_model=TaskResponse)
+def update_task(
+    id: int,
+    task_update: TaskUpdate,
+    session: Session = Depends(get_session),
+    token_payload: dict = Depends(JWTBearer())
+):
+    try:
+        # Get user from token
+        user = get_user_from_token(token_payload, session)
+        
+        # Fetch the task to update
+        task_to_update = session.exec(select(Task).where(Task.id == id)).first()
+        
+        # If task not found, raise exception
+        if not task_to_update:
+            raise TaskNotFound()
 
+        # Check if user has permission to update the task
+        if task_to_update.created_by != user.username:
+            raise UnauthorizedAccess()
 
+        # Check if any required field is missing for a PUT request
+        if not task_update.title or not task_update.description or task_update.completed is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="All fields (title, description, completed) must be provided for a full update."
+            )
+
+        # Validate title length if provided
+        if len(task_update.title) > 100:
+            raise TitleLengthExceed()
+
+        # Update the task fields with provided values
+        task_to_update.title = task_update.title
+        task_to_update.description = task_update.description
+        task_to_update.completed = task_update.completed
+
+        # Commit the changes
+        session.commit()
+        session.refresh(task_to_update)
+
+        # Prepare the updated task data
+        updated_task_data = {
+            "id": str(task_to_update.id),
+            "title": task_to_update.title,
+            "description": task_to_update.description,
+            "created_by": task_to_update.created_by,
+            "completed": task_to_update.completed,
+            "created_at": task_to_update.created_at.isoformat(),
+            "updated_at": task_to_update.updated_at.isoformat(),
+        }
+
+        # Invalidate cache for the updated task
+        redis_client.delete(f"task:{id}")
+
+        # Return the updated task data
+        return TaskResponse(**updated_task_data)
+
+    except TitleLengthExceed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Title length exceeds 100 characters. Please provide a shorter title."
+        )
+    except UnauthorizedAccess:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="You are not authorized to update this task. You can only update tasks created by you."
+        )
+    except TaskNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="Task not found. Please check the task ID and try again."
+        )
+    except Exception as e:
+        # Catch any unexpected errors and provide a generic error message
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Unexpected error occurred: {str(e)}"
+        )
 
 
 
